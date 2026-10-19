@@ -79,7 +79,7 @@ function getBackgroundColor(state: SceneState): string {
 }
 
 function drawCheckerboard(context: CanvasRenderingContext2D, width: number, height: number): void {
-  const tile = Math.max(16, Math.round(width / 70));
+  const tile = Math.max(16, Math.round(width / 40));
   context.fillStyle = "#e5e8eb";
   context.fillRect(0, 0, width, height);
   for (let y = 0; y < height; y += tile) {
@@ -103,6 +103,241 @@ function createParticles(seed: string, amount: number): Particle[] {
     drift: -0.08 + random() * 0.16,
     alpha: 0.18 + random() * 0.58,
   }));
+}
+
+type CameraTransform = { x: number; y: number; zoom: number; rotation: number; shearX: number; shearY: number };
+
+function easedWave(cycle: number, easing: string | undefined): number {
+  const wave = Math.sin(cycle);
+  const style = easing?.toLowerCase() ?? "";
+  if (style.includes("spring") || style.includes("elastic")) {
+    return Math.max(-1.08, Math.min(1.08, wave + Math.sin(cycle * 2) * 0.08));
+  }
+  if (style.includes("cubic")) return Math.sign(wave) * Math.pow(Math.abs(wave), 0.82);
+  if (style.includes("quintic")) return Math.sign(wave) * Math.pow(Math.abs(wave), 1.28);
+  return wave;
+}
+
+function getCameraTransform(state: SceneState, time: number, width: number, height: number): CameraTransform {
+  const profile = state.preset.motionProfile;
+  const phaseDegrees = profile?.phaseDegrees ?? hashString(state.seed) % 360;
+  const cycle = (time * Math.PI * 2) / 10 + (phaseDegrees * Math.PI) / 180;
+  const wave = easedWave(cycle, profile?.easing);
+  const crossWave = easedWave(cycle + Math.PI / 2, profile?.easing);
+  const secondWave = easedWave(cycle * 2 + 0.42, profile?.easing);
+  const intensity = Math.max(0.45, Math.min(1, state.preset.intensity));
+  const arcScale = Math.max(0.65, Math.min(1.15, (profile?.orbitDegrees ?? 24) / 36));
+  const xAmplitude = width * (0.035 + intensity * 0.02) * arcScale;
+  const yAmplitude = height * (0.018 + intensity * 0.012) * arcScale;
+  const rotationAmplitude = 0.018 + intensity * 0.018;
+  const zoomRange = 0.028 + intensity * 0.035;
+  const transform: CameraTransform = { x: 0, y: 0, zoom: 1.04, rotation: 0, shearX: 0, shearY: 0 };
+
+  switch (state.preset.motion) {
+    case "orbit":
+      transform.x = wave * xAmplitude;
+      transform.y = crossWave * yAmplitude;
+      transform.rotation = wave * rotationAmplitude;
+      transform.zoom = 1.045 + (0.5 + crossWave * 0.5) * zoomRange;
+      break;
+    case "drift":
+      transform.x = wave * xAmplitude * 1.2;
+      transform.y = easedWave(cycle + 0.8, profile?.easing) * yAmplitude;
+      transform.rotation = crossWave * rotationAmplitude * 0.35;
+      transform.zoom = 1.04 + (0.5 + wave * 0.5) * zoomRange * 0.7;
+      break;
+    case "pulse":
+      transform.x = wave * width * 0.016 * arcScale;
+      transform.y = crossWave * height * 0.014 * arcScale;
+      transform.rotation = wave * 0.008;
+      transform.zoom = 1.035 + (0.5 + wave * 0.5) * zoomRange * 1.4;
+      break;
+    case "ribbon":
+      transform.x = wave * xAmplitude;
+      transform.y = secondWave * yAmplitude * 0.8;
+      transform.rotation = wave * rotationAmplitude * 0.65;
+      transform.shearX = wave * 0.04 * intensity;
+      break;
+    case "ripple":
+      transform.x = wave * xAmplitude * 0.72;
+      transform.y = crossWave * yAmplitude;
+      transform.zoom = 1.04 + (0.5 + secondWave * 0.5) * zoomRange * 0.9;
+      transform.rotation = wave * 0.012;
+      break;
+    case "glide":
+      transform.x = wave * xAmplitude * 1.35;
+      transform.y = crossWave * yAmplitude * 0.45;
+      transform.rotation = crossWave * rotationAmplitude * 0.4;
+      transform.zoom = 1.045 + (0.5 + crossWave * 0.5) * zoomRange * 0.55;
+      break;
+    case "warp":
+      transform.x = wave * xAmplitude;
+      transform.y = crossWave * yAmplitude;
+      transform.rotation = wave * rotationAmplitude;
+      transform.shearX = wave * 0.05 * intensity;
+      transform.shearY = crossWave * 0.015 * intensity;
+      break;
+    case "bloom":
+      transform.x = wave * width * 0.015 * arcScale;
+      transform.y = crossWave * height * 0.012;
+      transform.zoom = 1.045 + (0.5 + wave * 0.5) * zoomRange * 1.3;
+      break;
+  }
+
+  const rhythm = profile?.rhythm.toLowerCase() ?? "";
+  if (/(accent|pulse|beat|accelerat|crescendo)/.test(rhythm)) {
+    transform.zoom += Math.max(0, easedWave(cycle * 2 + Math.PI / 2, profile?.easing)) * 0.012 * intensity;
+  }
+  if (state.mode === "3d") {
+    transform.rotation += crossWave * 0.018;
+    transform.shearX += crossWave * 0.035;
+    transform.shearY += wave * 0.012;
+  } else if (state.mode === "line-art") {
+    transform.rotation *= 0.72;
+  }
+  return transform;
+}
+
+function drawMotionLighting(context: CanvasRenderingContext2D, width: number, height: number, time: number, state: SceneState): void {
+  const profile = state.preset.motionProfile;
+  if (!profile || ["green", "blue", "custom"].includes(state.backgroundMode)) return;
+  const phase = (profile.phaseDegrees * Math.PI) / 180;
+  const cycle = (time * Math.PI * 2) / 10 + phase;
+  const x = width * (0.5 + Math.sin(cycle) * 0.4);
+  const y = height * (0.5 + Math.cos(cycle + Math.PI / 3) * 0.18);
+  const lighting = profile.lighting.toLowerCase();
+  const lightColor = /(warm|amber|copper|champagne|coral|dawn)/.test(lighting)
+    ? state.preset.palette.secondary
+    : /(cool|arctic|cyan|blue|pearl)/.test(lighting)
+      ? state.preset.palette.highlight
+      : state.preset.palette.accent;
+  const radius = Math.max(width, height) * 0.56;
+  const sweep = context.createRadialGradient(x, y, 0, x, y, radius);
+  sweep.addColorStop(0, rgba(lightColor, 0.13));
+  sweep.addColorStop(0.42, rgba(state.preset.palette.highlight, 0.07));
+  sweep.addColorStop(1, rgba(state.preset.palette.accent, 0));
+  context.save();
+  context.globalCompositeOperation = "screen";
+  context.globalAlpha = state.mode === "line-art" ? 1 : 0.78;
+  context.fillStyle = sweep;
+  context.fillRect(0, 0, width, height);
+  context.restore();
+}
+
+function drawScene(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  time: number,
+  state: SceneState,
+  image: HTMLImageElement | null,
+  particles: Particle[],
+): void {
+  if (!width || !height) return;
+  context.save();
+  context.clearRect(0, 0, width, height);
+
+  if (state.backgroundMode === "transparent") {
+    drawCheckerboard(context, width, height);
+  } else {
+    const base = getBackgroundColor(state);
+    context.fillStyle = base;
+    context.fillRect(0, 0, width, height);
+    const glowX = width * (0.49 + Math.sin(time * 0.14) * 0.09);
+    const glowY = height * (0.45 + Math.cos(time * 0.12) * 0.07);
+    const gradient = context.createRadialGradient(glowX, glowY, 0, glowX, glowY, Math.max(width, height) * 0.7);
+    gradient.addColorStop(0, rgba(state.preset.palette.accent, state.backgroundMode === "original" ? 0.14 : 0.06));
+    gradient.addColorStop(0.52, rgba(state.preset.palette.highlight, 0.04));
+    gradient.addColorStop(1, "rgba(5,7,11,0)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, width, height);
+  }
+
+  if (state.backgroundMode === "original" || state.backgroundMode === "transparent") {
+    const wash = context.createLinearGradient(0, 0, width, height);
+    wash.addColorStop(0, rgba(state.preset.palette.secondary, 0.05));
+    wash.addColorStop(0.53, "rgba(0,0,0,0)");
+    wash.addColorStop(1, rgba(state.preset.palette.accent, 0.08));
+    context.fillStyle = wash;
+    context.fillRect(0, 0, width, height);
+  }
+
+  if (image && image.complete && image.naturalWidth > 0) {
+    const fit = Math.max(width / image.naturalWidth, height / image.naturalHeight);
+    const camera = getCameraTransform(state, time, width, height);
+    const drawWidth = image.naturalWidth * fit;
+    const drawHeight = image.naturalHeight * fit;
+    context.save();
+    context.translate(width / 2 + camera.x, height / 2 + camera.y);
+    context.rotate(camera.rotation);
+    context.transform(1, camera.shearY, camera.shearX, 1, 0, 0);
+    context.scale(camera.zoom, camera.zoom);
+    context.globalAlpha = 0.18;
+    context.filter = "blur(20px) saturate(1.1)";
+    context.drawImage(image, -drawWidth / 2 - 4, -drawHeight / 2 + 5, drawWidth + 8, drawHeight + 8);
+    context.globalAlpha = 1;
+    context.filter = state.mode === "line-art" ? "grayscale(1) contrast(1.35) brightness(1.12)" : state.mode === "3d" ? "saturate(1.12) contrast(1.03)" : "saturate(1.04)";
+    context.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+    context.filter = "none";
+    if (state.mode === "line-art") {
+      context.globalCompositeOperation = "screen";
+      context.globalAlpha = 0.11;
+      context.drawImage(image, -drawWidth / 2 - 2, -drawHeight / 2, drawWidth, drawHeight);
+      context.globalAlpha = 1;
+      context.globalCompositeOperation = "source-over";
+    }
+    context.restore();
+
+    const vignette = context.createRadialGradient(width / 2, height / 2, height * 0.16, width / 2, height / 2, Math.max(width, height) * 0.73);
+    vignette.addColorStop(0, "rgba(4,6,10,0)");
+    vignette.addColorStop(1, "rgba(4,6,10,0.34)");
+    context.fillStyle = vignette;
+    context.fillRect(0, 0, width, height);
+  } else if (!image) {
+    drawAbstractArtwork(context, width, height, time, state);
+  } else if (image.complete && image.naturalWidth === 0) {
+    context.fillStyle = "rgba(240,243,247,0.76)";
+    context.font = `${Math.max(14, Math.round(width * 0.016))}px Inter, sans-serif`;
+    context.textAlign = "center";
+    context.fillText("This image could not be displayed", width / 2, height / 2);
+  }
+
+  drawMotionLighting(context, width, height, time, state);
+  drawParticles(context, width, height, time, state, particles);
+  drawAmbientLines(context, width, height, time, state);
+  context.restore();
+}
+
+async function waitForImage(image: HTMLImageElement | null): Promise<void> {
+  if (!image) throw new Error("The reference image is still loading. Wait a moment, then export again.");
+  if (image.complete) {
+    if (image.naturalWidth > 0) return;
+    throw new Error("The reference image could not be decoded by this browser.");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("The reference image is taking too long to load. Try choosing it again."));
+    }, 15_000);
+    const cleanup = (): void => {
+      window.clearTimeout(timeout);
+      image.removeEventListener("load", onLoad);
+      image.removeEventListener("error", onError);
+    };
+    const onLoad = (): void => {
+      cleanup();
+      if (image.naturalWidth > 0) resolve();
+      else reject(new Error("The reference image could not be decoded by this browser."));
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error("The reference image could not be decoded by this browser."));
+    };
+    image.addEventListener("load", onLoad, { once: true });
+    image.addEventListener("error", onError, { once: true });
+    if (image.complete) onLoad();
+  });
 }
 
 const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function StudioCanvas(props, ref) {
@@ -168,96 +403,11 @@ const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function 
         return;
       }
 
-      if (width >= 3840 && previousFrameRef.current && timestamp - previousFrameRef.current < 1000 / 30) {
-        frameId = window.requestAnimationFrame(drawFrame);
-        return;
-      }
       const delta = previousFrameRef.current ? Math.min(0.05, (timestamp - previousFrameRef.current) / 1000) : 0;
       previousFrameRef.current = timestamp;
       if (state.playing) elapsedRef.current += delta * state.speed;
       const time = elapsedRef.current;
-      context.save();
-      context.clearRect(0, 0, width, height);
-
-      if (state.backgroundMode === "transparent") {
-        drawCheckerboard(context, width, height);
-      } else {
-        const base = getBackgroundColor(state);
-        context.fillStyle = base;
-        context.fillRect(0, 0, width, height);
-        const glowX = width * (0.49 + Math.sin(time * 0.14) * 0.09);
-        const glowY = height * (0.45 + Math.cos(time * 0.12) * 0.07);
-        const gradient = context.createRadialGradient(glowX, glowY, 0, glowX, glowY, Math.max(width, height) * 0.7);
-        gradient.addColorStop(0, rgba(state.preset.palette.accent, state.backgroundMode === "original" ? 0.14 : 0.06));
-        gradient.addColorStop(0.52, rgba(state.preset.palette.highlight, 0.04));
-        gradient.addColorStop(1, "rgba(5,7,11,0)");
-        context.fillStyle = gradient;
-        context.fillRect(0, 0, width, height);
-      }
-
-      if (state.backgroundMode === "original" || state.backgroundMode === "transparent") {
-        const wash = context.createLinearGradient(0, 0, width, height);
-        wash.addColorStop(0, rgba(state.preset.palette.secondary, 0.05));
-        wash.addColorStop(0.53, "rgba(0,0,0,0)");
-        wash.addColorStop(1, rgba(state.preset.palette.accent, 0.08));
-        context.fillStyle = wash;
-        context.fillRect(0, 0, width, height);
-      }
-
-      const image = imageRef.current;
-      if (image && image.complete && image.naturalWidth > 0) {
-        const naturalWidth = image.naturalWidth;
-        const naturalHeight = image.naturalHeight;
-        const fit = Math.max(width / naturalWidth, height / naturalHeight);
-        const motionAmount = 0.012 + state.preset.intensity * 0.028;
-        const orbit = Math.sin(time * (state.preset.motion === "orbit" ? 0.32 : 0.2) + 0.2) * motionAmount;
-        const driftX = Math.sin(time * 0.17 + 0.6) * width * 0.009;
-        const driftY = Math.cos(time * 0.13 + 1.2) * height * 0.009;
-        const zoom = 1.018 + (Math.sin(time * 0.21) + 1) * 0.013 * state.preset.intensity;
-        const rotation = state.mode === "3d" ? Math.sin(time * 0.2) * 0.015 : state.mode === "line-art" ? Math.sin(time * 0.12) * 0.003 : 0;
-        const drawWidth = naturalWidth * fit * zoom;
-        const drawHeight = naturalHeight * fit * zoom;
-
-        context.save();
-        context.translate(width / 2 + driftX, height / 2 + driftY);
-        context.rotate(rotation + orbit * 0.12);
-        if (state.mode === "3d") {
-          const depth = Math.sin(time * 0.18) * 0.012;
-          context.transform(1, depth * 0.18, depth, 1, 0, 0);
-        }
-        context.globalAlpha = 0.18;
-        context.filter = "blur(20px) saturate(1.1)";
-        context.drawImage(image, -drawWidth / 2 - 4, -drawHeight / 2 + 5, drawWidth + 8, drawHeight + 8);
-        context.globalAlpha = 1;
-        context.filter = state.mode === "line-art" ? "grayscale(1) contrast(1.35) brightness(1.12)" : state.mode === "3d" ? "saturate(1.12) contrast(1.03)" : "saturate(1.04)";
-        context.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
-        context.filter = "none";
-        if (state.mode === "line-art") {
-          context.globalCompositeOperation = "screen";
-          context.globalAlpha = 0.11;
-          context.drawImage(image, -drawWidth / 2 - 2, -drawHeight / 2, drawWidth, drawHeight);
-          context.globalAlpha = 1;
-          context.globalCompositeOperation = "source-over";
-        }
-        context.restore();
-
-        const vignette = context.createRadialGradient(width / 2, height / 2, height * 0.16, width / 2, height / 2, Math.max(width, height) * 0.73);
-        vignette.addColorStop(0, "rgba(4,6,10,0)");
-        vignette.addColorStop(1, "rgba(4,6,10,0.34)");
-        context.fillStyle = vignette;
-        context.fillRect(0, 0, width, height);
-      } else if (!image) {
-        drawAbstractArtwork(context, width, height, time, state);
-      } else if (image.complete && image.naturalWidth === 0) {
-        context.fillStyle = "rgba(240,243,247,0.76)";
-        context.font = `${Math.max(14, Math.round(width * 0.016))}px Inter, sans-serif`;
-        context.textAlign = "center";
-        context.fillText("This image could not be displayed", width / 2, height / 2);
-      }
-
-      drawParticles(context, width, height, time, state, particlesRef.current);
-      drawAmbientLines(context, width, height, time, state);
-      context.restore();
+      drawScene(context, width, height, time, state, imageRef.current, particlesRef.current);
       frameId = window.requestAnimationFrame(drawFrame);
     };
 
@@ -273,70 +423,121 @@ const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function 
 
   useImperativeHandle(ref, () => ({
     async record(settings, onProgress): Promise<Blob> {
-      const canvas = canvasRef.current;
-      if (!canvas) throw new Error("The motion stage is not ready to capture.");
-      if (typeof canvas.captureStream !== "function" || typeof MediaRecorder === "undefined") {
-        throw new Error("Video capture is not supported in this browser. Use an up-to-date desktop version of Chrome, Edge, or Firefox.");
+      const stage = canvasRef.current;
+      if (!stage) throw new Error("The motion stage is not ready to capture.");
+      if (typeof MediaRecorder === "undefined") {
+        throw new Error("Video capture is not supported in this browser. Use an up-to-date version of Chrome, Edge, or Firefox.");
       }
 
-      const originalWidth = canvas.width;
-      const originalHeight = canvas.height;
-      const width = settings.resolution === "4k" ? 3840 : 1920;
-      const height = settings.resolution === "4k" ? 2160 : 1080;
-      const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
-        .find((type) => MediaRecorder.isTypeSupported(type));
+      const scene = sceneRef.current;
+      let sourceImage = imageRef.current;
+      if (scene.imageUrl && !sourceImage) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
+        sourceImage = imageRef.current;
+      }
+      if (scene.imageUrl) await waitForImage(sourceImage);
+
+      const isMobile = window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 768;
+      const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+      const isLowMemory = typeof deviceMemory === "number" && deviceMemory <= 4;
+      const mobileCaptureWidth = settings.resolution === "1080p" || isLowMemory ? 1280 : 1600;
+      const width = isMobile ? mobileCaptureWidth : isLowMemory ? 1600 : 1920;
+      const height = Math.round((width * 9) / 16);
+      const captureCanvas = document.createElement("canvas");
+      captureCanvas.width = width;
+      captureCanvas.height = height;
+      const captureContext = captureCanvas.getContext("2d", { alpha: false, desynchronized: true });
+      if (!captureContext) throw new Error("This browser could not create a safe-resolution export canvas.");
+      if (typeof captureCanvas.captureStream !== "function") {
+        throw new Error("Video capture is not supported in this browser. Try a current desktop browser.");
+      }
+
+      const mobileTypes = ["video/webm;codecs=vp8", "video/webm;codecs=vp9", "video/webm"];
+      const desktopTypes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+      const isTypeSupported = typeof MediaRecorder.isTypeSupported === "function"
+        ? (type: string) => MediaRecorder.isTypeSupported(type)
+        : (type: string) => type === "video/webm";
+      const mimeType = (isMobile ? mobileTypes : desktopTypes).find(isTypeSupported);
       if (!mimeType) throw new Error("This browser cannot record a WebM capture for FFmpeg.");
 
-      canvas.width = width;
-      canvas.height = height;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const stream = canvas.captureStream(settings.fps);
-      const bitrate = settings.resolution === "4k" ? 12_000_000 : 6_000_000;
-      let recorder: MediaRecorder;
-      try {
-        recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
-      } catch {
-        stream.getTracks().forEach((track) => track.stop());
-        canvas.width = originalWidth;
-        canvas.height = originalHeight;
-        throw new Error("The browser could not initialize a video encoder for this export.");
-      }
-
-      const chunks: BlobPart[] = [];
-      let timer: number | undefined;
-      const result = new Promise<Blob>((resolve, reject) => {
-        recorder.ondataavailable = (event: BlobEvent): void => {
-          if (event.data.size > 0) chunks.push(event.data);
-        };
-        recorder.onerror = (): void => reject(new Error("The browser interrupted the video capture."));
-        recorder.onstop = (): void => {
-          const blob = new Blob(chunks, { type: mimeType });
-          if (blob.size < 256) reject(new Error("The captured stage did not contain a usable video stream."));
-          else resolve(blob);
-        };
-        recorder.start(1000);
-        const started = performance.now();
-        const update = (): void => {
-          const elapsed = (performance.now() - started) / 1000;
-          const captureProgress = Math.min(1, elapsed / settings.duration);
-          onProgress(Math.round(captureProgress * 78), `Capturing frame ${Math.min(settings.duration, elapsed).toFixed(1)} / ${settings.duration.toFixed(1)} sec`);
-          if (captureProgress < 1) timer = window.setTimeout(update, 180);
-          else if (recorder.state !== "inactive") recorder.stop();
-        };
-        timer = window.setTimeout(update, 120);
-      });
+      const exportState: SceneState = { ...scene, playing: true };
+      const exportParticles = createParticles(`${scene.seed}:${scene.preset.id}`, Math.max(26, scene.preset.particleCount));
+      const bitrate = width >= 1920 ? 8_000_000 : width >= 1600 ? 6_000_000 : 5_000_000;
+      let stream: MediaStream | undefined;
+      let recorder: MediaRecorder | undefined;
+      let frameId = 0;
+      let progressTimer: number | undefined;
 
       try {
+        drawScene(captureContext, width, height, 0, exportState, sourceImage, exportParticles);
+        stream = captureCanvas.captureStream(settings.fps);
+        if (stream.getVideoTracks().length === 0) throw new Error("The browser did not create a video capture track.");
+        try {
+          recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
+        } catch {
+          throw new Error("The browser could not initialize a video encoder. Try exporting at Full HD.");
+        }
+
+        const chunks: BlobPart[] = [];
+        const captureDuration = settings.duration;
+        let started = 0;
+        const result = new Promise<Blob>((resolve, reject) => {
+          let settled = false;
+          const fail = (error: Error): void => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+          };
+          recorder!.ondataavailable = (event: BlobEvent): void => {
+            if (event.data.size > 0) chunks.push(event.data);
+          };
+          recorder!.onerror = (): void => fail(new Error("The browser interrupted video capture. Try Full HD or keep the tab open during export."));
+          recorder!.onstop = (): void => {
+            if (settled) return;
+            settled = true;
+            const blob = new Blob(chunks, { type: mimeType });
+            if (blob.size < 256) {
+              reject(new Error("The browser captured no usable video frames. Try Full HD and keep this tab in the foreground."));
+            } else {
+              resolve(blob);
+            }
+          };
+
+          try {
+            recorder!.start(1000);
+            started = performance.now();
+            const drawCaptureFrame = (timestamp: number): void => {
+              const elapsed = Math.max(0, (timestamp - started) / 1000);
+              const sceneTime = Math.min(captureDuration, elapsed) * exportState.speed;
+              drawScene(captureContext, width, height, sceneTime, exportState, sourceImage, exportParticles);
+              if (elapsed < captureDuration) {
+                frameId = window.requestAnimationFrame(drawCaptureFrame);
+              } else if (recorder!.state !== "inactive") {
+                recorder!.stop();
+              }
+            };
+            frameId = window.requestAnimationFrame(drawCaptureFrame);
+            progressTimer = window.setInterval(() => {
+              const elapsed = Math.min(captureDuration, Math.max(0, (performance.now() - started) / 1000));
+              const captureProgress = elapsed / captureDuration;
+              onProgress(Math.round(captureProgress * 78), `Capturing frame ${elapsed.toFixed(1)} / ${captureDuration.toFixed(1)} sec`);
+              if (elapsed >= captureDuration && recorder!.state !== "inactive") recorder!.stop();
+            }, 180);
+          } catch (error) {
+            fail(error instanceof Error ? error : new Error("The browser could not start video capture."));
+          }
+        });
+
         const blob = await result;
-        onProgress(82, "Uploading capture to the render engine…");
+        onProgress(82, "Capture ready; preparing upload…");
         return blob;
       } finally {
-        if (timer) window.clearTimeout(timer);
-        if (recorder.state !== "inactive") recorder.stop();
-        stream.getTracks().forEach((track) => track.stop());
-        canvas.width = originalWidth;
-        canvas.height = originalHeight;
-        onProgress(86, "Restoring preview…");
+        if (frameId) window.cancelAnimationFrame(frameId);
+        if (progressTimer !== undefined) window.clearInterval(progressTimer);
+        if (recorder && recorder.state !== "inactive") recorder.stop();
+        stream?.getTracks().forEach((track) => track.stop());
+        captureCanvas.width = 1;
+        captureCanvas.height = 1;
       }
     },
   }), []);

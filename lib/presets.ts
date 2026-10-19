@@ -1,6 +1,17 @@
 export type MotionMode = "2d" | "3d" | "line-art";
 export type BackgroundMode = "original" | "transparent" | "green" | "blue" | "custom";
 
+export type MotionPattern = "orbit" | "drift" | "pulse" | "ribbon" | "ripple" | "glide" | "warp" | "bloom";
+
+export type MotionProfile = {
+  camera: string;
+  lighting: string;
+  rhythm: string;
+  easing: string;
+  phaseDegrees: number;
+  orbitDegrees: number;
+};
+
 export type StudioPreset = {
   id: string;
   name: string;
@@ -11,7 +22,8 @@ export type StudioPreset = {
     highlight: string;
     secondary: string;
   };
-  motion: "orbit" | "drift" | "pulse" | "ribbon" | "ripple" | "glide" | "warp" | "bloom";
+  motion: MotionPattern;
+  motionProfile?: MotionProfile;
   particle: string;
   layout: string;
   intensity: number;
