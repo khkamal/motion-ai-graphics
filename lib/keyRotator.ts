@@ -1,32 +1,31 @@
-import { decryptApiKey } from "@/lib/keyVault";
-import {
-  coolDownApiKey,
-  getWorkspaceApiKeys,
-  markApiKeySuccessful,
-  markApiKeyUsed,
-  nextWorkspaceKeyIndex,
-  rejectApiKey,
-  resetWorkspaceKeyIndex,
-} from "@/lib/database";
+import type { BrowserApiKey } from "@/lib/browserKeyStore";
 
 const RATE_LIMIT_COOLDOWN_MS = 60_000;
 
-export class ApiKeyPoolEmptyError extends Error {
-  constructor() {
-    super("No Gemini API keys are configured for this workspace.");
-    this.name = "ApiKeyPoolEmptyError";
-  }
-}
-
 export class ApiKeyPoolExhaustedError extends Error {
+  readonly keys: BrowserApiKey[];
+  readonly rotationCursor: number;
   readonly retryAt: Date | null;
 
-  constructor(message: string, retryAt: Date | null = null) {
+  constructor(
+    message: string,
+    keys: BrowserApiKey[],
+    rotationCursor: number,
+    retryAt: Date | null = null,
+  ) {
     super(message);
     this.name = "ApiKeyPoolExhaustedError";
+    this.keys = keys;
+    this.rotationCursor = rotationCursor;
     this.retryAt = retryAt;
   }
 }
+
+export type RotatingKeyResult = {
+  response: Response;
+  keys: BrowserApiKey[];
+  rotationCursor: number;
+};
 
 function isRateLimit(status: number, body: string): boolean {
   return status === 429 || /resource[_ ]?exhausted|quota exceeded|rate.?limit/i.test(body);
@@ -41,81 +40,95 @@ function isRetryableStatus(status: number): boolean {
 }
 
 export async function requestWithRotatingKey(
-  workspaceId: string,
+  inputKeys: BrowserApiKey[],
+  rotationCursor: number,
   requestFactory: (apiKey: string, signal: AbortSignal) => Promise<Response>,
-): Promise<Response> {
-  const storedKeys = getWorkspaceApiKeys(workspaceId);
-  if (storedKeys.length === 0) throw new ApiKeyPoolEmptyError();
-  const allKeys = storedKeys.filter((key) => key.status === "ACTIVE");
-  if (allKeys.length === 0) throw new ApiKeyPoolExhaustedError("All stored Gemini keys were rejected and need to be replaced.");
-
-  const now = new Date();
-  const readyKeys = allKeys.filter((key) => !key.cooldownUntil || key.cooldownUntil <= now);
-  if (readyKeys.length === 0) {
-    const retryAt = allKeys
-      .map((key) => key.cooldownUntil)
-      .filter((value): value is Date => value !== null)
-      .sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
-    throw new ApiKeyPoolExhaustedError("All configured Gemini keys are cooling down after rate limits.", retryAt);
+): Promise<RotatingKeyResult> {
+  const keys = inputKeys.map((key) => ({ ...key }));
+  if (keys.length === 0) {
+    throw new ApiKeyPoolExhaustedError("No Gemini API keys are configured in this browser.", keys, 0);
   }
 
-  const start = nextWorkspaceKeyIndex(workspaceId, readyKeys.length);
+  const start = ((rotationCursor % keys.length) + keys.length) % keys.length;
+  const nextCursor = (start + 1) % keys.length;
+  const now = Date.now();
+  const retryDates = keys
+    .filter((key) => key.status === "COOLDOWN" && key.cooldownUntil)
+    .map((key) => new Date(key.cooldownUntil as string))
+    .filter((date) => Number.isFinite(date.getTime()) && date.getTime() > now)
+    .sort((left, right) => left.getTime() - right.getTime());
+
+  let readyCount = 0;
   let lastFailure = "Gemini request failed.";
   let lastRetryAt: Date | null = null;
 
-  for (let attempt = 0; attempt < readyKeys.length; attempt += 1) {
-    const index = (start + attempt) % readyKeys.length;
-    const record = readyKeys[index];
-    let apiKey: string;
+  for (let offset = 0; offset < keys.length; offset += 1) {
+    const index = (start + offset) % keys.length;
+    const key = keys[index];
+    if (key.status === "INVALID") continue;
+    if (key.status === "COOLDOWN" && key.cooldownUntil) {
+      const cooldownUntil = new Date(key.cooldownUntil);
+      if (cooldownUntil.getTime() > now) {
+        lastRetryAt = retryDates[0] ?? cooldownUntil;
+        continue;
+      }
+      key.status = "ACTIVE";
+      key.cooldownUntil = null;
+    }
+
+    readyCount += 1;
+    key.lastUsedAt = new Date().toISOString();
+    let response: Response;
     try {
-      apiKey = decryptApiKey(record.encryptedKey);
-    } catch {
-      rejectApiKey(record.id);
-      lastFailure = "A stored Gemini key could not be decrypted. Check API_KEY_ENCRYPTION_KEY.";
+      response = await requestFactory(key.value, AbortSignal.timeout(30_000));
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : "Gemini network request failed.";
       continue;
     }
 
-    markApiKeyUsed(record.id);
-    let response: Response;
-    try {
-      response = await requestFactory(apiKey, AbortSignal.timeout(30_000));
-    } catch (error) {
-      lastFailure = error instanceof Error ? error.message : "Gemini network request failed.";
-      if (attempt < readyKeys.length - 1) continue;
-      throw new ApiKeyPoolExhaustedError(lastFailure);
-    }
-
     if (response.ok) {
-      markApiKeySuccessful(record.id);
-      return response;
+      key.status = "ACTIVE";
+      key.failureCount = 0;
+      key.cooldownUntil = null;
+      return { response, keys, rotationCursor: nextCursor };
     }
 
     const body = await response.clone().text().catch(() => "");
     if (isRateLimit(response.status, body)) {
-      const cooldownUntil = new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS);
-      coolDownApiKey(record.id, cooldownUntil);
-      lastRetryAt = cooldownUntil;
+      key.failureCount += 1;
+      key.status = "COOLDOWN";
+      key.cooldownUntil = new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS).toISOString();
+      lastRetryAt = new Date(key.cooldownUntil);
       lastFailure = "Gemini rate limit reached for the current key.";
       continue;
     }
 
     if (isKeyRejected(response.status, body)) {
-      rejectApiKey(record.id);
+      key.failureCount += 1;
+      key.status = "INVALID";
+      key.cooldownUntil = null;
       lastFailure = "A Gemini key was rejected. Check its permissions or replace it.";
       continue;
     }
 
-    if (isRetryableStatus(response.status) && attempt < readyKeys.length - 1) {
+    if (isRetryableStatus(response.status) && offset < keys.length - 1) {
       lastFailure = `Gemini returned a temporary ${response.status} error.`;
       continue;
     }
 
-    return response;
+    return { response, keys, rotationCursor: nextCursor };
   }
 
-  throw new ApiKeyPoolExhaustedError(lastFailure, lastRetryAt);
-}
-
-export async function resetKeyRotation(workspaceId: string): Promise<void> {
-  resetWorkspaceKeyIndex(workspaceId);
+  if (readyCount === 0 && retryDates.length > 0) {
+    throw new ApiKeyPoolExhaustedError(
+      `All usable Gemini keys are cooling down. Retry after ${retryDates[0].toLocaleTimeString()}.`,
+      keys,
+      nextCursor,
+      retryDates[0],
+    );
+  }
+  if (readyCount === 0 && keys.every((key) => key.status === "INVALID")) {
+    throw new ApiKeyPoolExhaustedError("All Gemini keys were rejected and need to be replaced.", keys, nextCursor);
+  }
+  throw new ApiKeyPoolExhaustedError(lastFailure, keys, nextCursor, lastRetryAt);
 }

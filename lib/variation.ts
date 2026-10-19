@@ -1,5 +1,4 @@
 import { randomBytes, randomInt } from "node:crypto";
-import { hasStyleSignature } from "@/lib/database";
 import type { MotionMode } from "@/lib/presets";
 
 const palettes = [
@@ -115,11 +114,12 @@ export type DynamicVariation = {
 };
 
 export async function createDynamicVariation(input: {
-  workspaceId: string;
   mode: MotionMode;
   presetName: string;
   basePrompt: string;
+  recentSignatures?: string[];
 }): Promise<DynamicVariation> {
+  const recentSignatures = new Set(input.recentSignatures ?? []);
   let variation: DynamicVariation | undefined;
 
   for (let attempt = 0; attempt < 32; attempt += 1) {
@@ -133,7 +133,7 @@ export async function createDynamicVariation(input: {
     ];
     const seed = randomBytes(16).toString("hex");
     const signature = indexes.map((index) => index.toString(16).padStart(2, "0")).join("");
-    if (hasStyleSignature(input.workspaceId, signature)) continue;
+    if (recentSignatures.has(signature)) continue;
 
     variation = {
       seed,

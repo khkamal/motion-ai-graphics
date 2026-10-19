@@ -31,6 +31,15 @@ import RenderModal, { type RenderSettings } from "@/components/RenderModal";
 import Sidebar from "@/components/Sidebar";
 import StudioCanvas, { type StudioCanvasHandle } from "@/components/StudioCanvas";
 import { presetById, studioPresets, type BackgroundMode, type MotionMode, type StudioPreset } from "@/lib/presets";
+import {
+  applyBrowserApiKeyUpdates,
+  readBrowserApiKeys,
+  readBrowserRotationCursor,
+  readRecentStyleSignatures,
+  rememberStyleSignature,
+  writeBrowserRotationCursor,
+  type BrowserApiKeyUpdate,
+} from "@/lib/browserKeyStore";
 
 type NoticeTone = "success" | "warning" | "error";
 type DynamicStyle = {
@@ -53,6 +62,8 @@ type GenerationPayload = {
   prompt: string;
   aiEnhanced: boolean;
   notice: string | null;
+  keyUpdates: BrowserApiKeyUpdate[];
+  rotationCursor: number;
 };
 
 const modes: Array<{ id: MotionMode; label: string; short: string; icon: typeof Layers3 }> = [
@@ -291,6 +302,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
     setGenerationNotice("");
     setGeneratedPrompt("");
     try {
+      const browserKeys = readBrowserApiKeys();
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -300,10 +312,16 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
           modifier,
           mode,
           presetName: selectedPreset.name,
+          keys: browserKeys,
+          rotationCursor: readBrowserRotationCursor(),
+          recentSignatures: readRecentStyleSignatures(),
         }),
       });
       const payload = await response.json() as GenerationPayload & { error?: string; details?: unknown };
       if (!response.ok) throw new Error(payload.error || "The motion direction could not be generated.");
+      applyBrowserApiKeyUpdates(payload.keyUpdates ?? []);
+      writeBrowserRotationCursor(payload.rotationCursor ?? 0);
+      rememberStyleSignature(payload.styleSignature);
       setSeed(payload.seed);
       setDynamicStyle(payload.style);
       setGeneratedPrompt(payload.prompt);
@@ -316,6 +334,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
     } catch (caught) {
       const localSeed = createClientSeed();
       const fallback = makeLocalPrompt({ basePrompt, modifier, mode, presetName: selectedPreset.name, seed: localSeed });
+      rememberStyleSignature(`fresh-${localSeed.slice(0, 20)}`);
       setSeed(localSeed);
       setDynamicStyle(fallback.style);
       setGeneratedPrompt(fallback.prompt);

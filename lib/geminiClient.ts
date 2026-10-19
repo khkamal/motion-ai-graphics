@@ -1,4 +1,5 @@
-import { requestWithRotatingKey } from "@/lib/keyRotator";
+import { requestWithRotatingKey, ApiKeyPoolExhaustedError } from "@/lib/keyRotator";
+import type { BrowserApiKey } from "@/lib/browserKeyStore";
 import type { DynamicVariation } from "@/lib/variation";
 import type { MotionMode } from "@/lib/presets";
 
@@ -8,25 +9,35 @@ export type GeminiImage = {
 };
 
 export type PromptVariationRequest = {
-  workspaceId: string;
   image: GeminiImage;
   basePrompt: string;
   modifier: string;
   mode: MotionMode;
   presetName: string;
   variation: DynamicVariation;
+  keys: BrowserApiKey[];
+  rotationCursor: number;
 };
 
 export type PromptVariationResult = {
   prompt: string;
   aiEnhanced: boolean;
   notice?: string;
+  keys: BrowserApiKey[];
+  rotationCursor: number;
 };
 
 function extractGeminiText(payload: unknown): string {
   if (!payload || typeof payload !== "object") return "";
   const candidates = (payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }).candidates;
   return candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join(" ").trim() ?? "";
+}
+
+function failureNotice(message: string): string {
+  if (/no gemini api keys/i.test(message)) return "Gemini is not connected. A unique local motion direction was created instead.";
+  if (/cooling down|rate limit/i.test(message)) return "Gemini keys are rate-limited. A unique local motion direction was created instead.";
+  if (/rejected|replace/i.test(message)) return "Gemini keys were rejected. Replace them in this browser to enable image-aware prompts.";
+  return "Gemini could not be reached. A unique local motion direction was created instead.";
 }
 
 export async function createGeminiMotionPrompt(input: PromptVariationRequest): Promise<PromptVariationResult> {
@@ -47,7 +58,7 @@ export async function createGeminiMotionPrompt(input: PromptVariationRequest): P
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
   try {
-    const response = await requestWithRotatingKey(input.workspaceId, (apiKey, signal) =>
+    const result = await requestWithRotatingKey(input.keys, input.rotationCursor, (apiKey, signal) =>
       fetch(endpoint, {
         method: "POST",
         headers: {
@@ -74,25 +85,38 @@ export async function createGeminiMotionPrompt(input: PromptVariationRequest): P
       }),
     );
 
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`Gemini ${response.status}: ${detail.slice(0, 500)}`);
+    if (!result.response.ok) {
+      const detail = await result.response.text().catch(() => "");
+      return {
+        prompt: "",
+        aiEnhanced: false,
+        notice: failureNotice(`Gemini ${result.response.status}: ${detail.slice(0, 500)}`),
+        keys: result.keys,
+        rotationCursor: result.rotationCursor,
+      };
     }
 
-    const payload: unknown = await response.json();
+    const payload: unknown = await result.response.json();
     const prompt = extractGeminiText(payload);
-    if (!prompt) throw new Error("Gemini returned an empty motion prompt.");
-    return { prompt, aiEnhanced: true };
+    if (!prompt) {
+      return {
+        prompt: "",
+        aiEnhanced: false,
+        notice: "Gemini returned an empty prompt. A unique local motion direction was created instead.",
+        keys: result.keys,
+        rotationCursor: result.rotationCursor,
+      };
+    }
+    return { prompt, aiEnhanced: true, keys: result.keys, rotationCursor: result.rotationCursor };
   } catch (error) {
-    const notice = error instanceof Error ? error.message : "Gemini prompt refinement is temporarily unavailable.";
+    const message = error instanceof Error ? error.message : "Gemini prompt refinement is temporarily unavailable.";
+    const poolError = error instanceof ApiKeyPoolExhaustedError ? error : null;
     return {
       prompt: "",
       aiEnhanced: false,
-      notice: notice.includes("No Gemini API keys")
-        ? "Gemini is not connected. A unique local motion direction was created instead."
-        : notice.includes("cooling down") || notice.includes("rate limit")
-          ? "Gemini keys are rate-limited. A unique local motion direction was created instead."
-          : "Gemini could not be reached. A unique local motion direction was created instead.",
+      notice: failureNotice(message),
+      keys: poolError?.keys ?? input.keys,
+      rotationCursor: poolError?.rotationCursor ?? input.rotationCursor,
     };
   }
 }
