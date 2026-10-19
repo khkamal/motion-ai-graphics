@@ -41,7 +41,7 @@ function failureNotice(message: string): string {
 }
 
 export async function createGeminiMotionPrompt(input: PromptVariationRequest): Promise<PromptVariationResult> {
-  const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL?.trim() || "gemini-3.1-flash-lite";
   const basePrompt = input.basePrompt.trim() || "Read the image composition and identify its central subject.";
   const modifier = input.modifier.trim() || "No additional element changes requested.";
   const systemBrief = [

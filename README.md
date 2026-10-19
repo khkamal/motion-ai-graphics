@@ -12,7 +12,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Open `http://localhost:3000`; the landing page links to the workspace at `/dashboard`. `GEMINI_MODEL` is optional and defaults to `gemini-2.5-flash`.
+Open `http://localhost:3000`; the landing page links to the workspace at `/dashboard`. `GEMINI_MODEL` is optional and defaults to `gemini-3.1-flash-lite`.
 
 ## Browser-local data
 
