@@ -149,7 +149,7 @@ export default function RenderModal({ open, onClose, onExport }: RenderModalProp
             </div>
           )}
 
-          <p className="render-disclaimer">The stage is captured in your browser, then FFmpeg encodes the final 30 FPS file on the studio server. The transparency checker is flattened in MP4/MOV; choose green or blue when you need a chroma plate. Large 4K renders can take a few minutes.</p>
+          <p className="render-disclaimer">The animation is captured at a device-safe browser resolution, then FFmpeg creates your selected 30 FPS delivery size on the studio server. The transparency checker is flattened in MP4/MOV; choose green or blue for a chroma plate. 4K encoding can take a few minutes.</p>
         </div>
 
         <div className="render-modal-footer">

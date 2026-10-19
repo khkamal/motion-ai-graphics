@@ -30,7 +30,7 @@ import ImageUploader, { type UploadedReference } from "@/components/ImageUploade
 import RenderModal, { type RenderSettings } from "@/components/RenderModal";
 import Sidebar from "@/components/Sidebar";
 import StudioCanvas, { type StudioCanvasHandle } from "@/components/StudioCanvas";
-import { presetById, studioPresets, type BackgroundMode, type MotionMode, type StudioPreset } from "@/lib/presets";
+import { presetById, studioPresets, type BackgroundMode, type MotionMode, type MotionPattern, type StudioPreset } from "@/lib/presets";
 import {
   applyBrowserApiKeyUpdates,
   readBrowserApiKeys,
@@ -159,11 +159,22 @@ function readableTime(seconds: number): string {
   return `00:${String(Math.floor(wholeSeconds / 60)).padStart(2, "0")}:${String(wholeSeconds % 60).padStart(2, "0")}`;
 }
 
+function motionPatternForCamera(camera: string, seedNumber: number): MotionPattern {
+  const direction = camera.toLowerCase();
+  if (/orbit|arc|spiral/.test(direction)) return "orbit";
+  if (/push-in|dolly-back|macro|focal pull/.test(direction)) return "pulse";
+  if (/parallax|depth|foreground/.test(direction)) return "drift";
+  if (/crane|rising|rise/.test(direction)) return "ribbon";
+  if (/lateral|glide|track|sweep/.test(direction)) return "glide";
+  if (/near-static|breathing-axis/.test(direction)) return "bloom";
+  if (/focus|tilt/.test(direction)) return "ripple";
+  return studioPresets[seedNumber % studioPresets.length].motion;
+}
+
 function buildVariationPreset(base: StudioPreset, seed: string, style: DynamicStyle | null): StudioPreset {
   if (!style || !seed) return base;
   const seedNumber = Number.parseInt(seed.slice(0, 8), 16) || 1;
   const theme = studioPresets[seedNumber % studioPresets.length];
-  const motion = studioPresets[(seedNumber >>> 3) % studioPresets.length].motion;
   return {
     ...base,
     palette: {
@@ -172,10 +183,18 @@ function buildVariationPreset(base: StudioPreset, seed: string, style: DynamicSt
       highlight: theme.palette.highlight,
       secondary: theme.palette.secondary,
     },
-    motion,
+    motion: motionPatternForCamera(style.camera, seedNumber),
+    motionProfile: {
+      camera: style.camera,
+      lighting: style.lighting,
+      rhythm: style.rhythm,
+      easing: style.easing,
+      phaseDegrees: style.phaseDegrees,
+      orbitDegrees: style.orbitDegrees,
+    },
     particle: style.particles,
     layout: style.camera,
-    intensity: Math.max(0.42, Math.min(1, style.orbitDegrees / 43)),
+    intensity: Math.max(0.62, Math.min(1, style.orbitDegrees / 40)),
     particleCount: Math.max(28, Math.min(110, Math.round(style.particleDensity))),
   };
 }
@@ -329,6 +348,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
       setGenerationNotice(payload.notice || (payload.aiEnhanced ? "Image analyzed and style varied with Gemini." : "A unique local variation was created."));
       setPlayhead(0);
       setSeekRevision((revision) => revision + 1);
+      setPlaying(true);
       if (payload.aiEnhanced) showNotice("A fresh Gemini motion direction is ready.");
       else showNotice("A unique motion direction is ready. Add Gemini keys for image-aware prompt refinement.", "warning");
     } catch (caught) {
@@ -342,6 +362,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
       setGenerationNotice("The studio service could not be reached. A fresh local direction is active; try again when the connection is restored.");
       setPlayhead(0);
       setSeekRevision((revision) => revision + 1);
+      setPlaying(true);
       showNotice(caught instanceof Error ? caught.message : "Generation service unavailable; local variation applied.", "warning");
     } finally {
       setIsGenerating(false);
