@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Workspace {
+  id         String       @id
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  rotationCursor Int      @default(0)
+  apiKeys    ApiKey[]
+  generations Generation[]
+  presets    Preset[]
+}
+
+model ApiKey {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  encryptedKey  String
+  fingerprint   String
+  label         String
+  keyHint       String
+  status        String    @default("ACTIVE")
+  failureCount  Int       @default(0)
+  cooldownUntil DateTime?
+  lastUsedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([workspaceId, fingerprint])
+  @@index([workspaceId, status, cooldownUntil])
+}
+
+model Generation {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  seed           String    @unique
+  styleSignature String
+  mode            String
+  presetName      String
+  basePrompt      String
+  generatedPrompt String?
+  aiEnhanced      Boolean   @default(false)
+  status          String    @default("CREATED")
+  createdAt       DateTime  @default(now())
+
+  @@index([workspaceId, styleSignature])
+  @@index([workspaceId, createdAt])
+}
+
+model Preset {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  configuration String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([workspaceId, name])
+}
