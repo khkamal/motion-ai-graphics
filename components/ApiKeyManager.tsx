@@ -2,16 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Check, CircleHelp, KeyRound, LoaderCircle, LockKeyhole, Plus, ShieldCheck, X } from "lucide-react";
-
-type StoredKey = {
-  id: string;
-  label: string;
-  masked: string;
-  status: string;
-  failureCount: number;
-  cooldownUntil: string | null;
-  lastUsedAt: string | null;
-};
+import {
+  clearBrowserApiKeys,
+  KEY_POOL_UPDATED_EVENT,
+  parseBrowserApiKeyInput,
+  readBrowserApiKeys,
+  saveBrowserApiKeys,
+  type BrowserApiKey as StoredKey,
+} from "@/lib/browserKeyStore";
 
 type ApiKeyManagerProps = {
   onKeyCountChange?: (count: number) => void;
@@ -30,15 +28,12 @@ export default function ApiKeyManager({ onKeyCountChange, openVersion = 0 }: Api
   const loadKeys = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const response = await fetch("/api/keys", { cache: "no-store" });
-      const payload = await response.json() as { keys?: StoredKey[]; total?: number; error?: string };
-      if (!response.ok) throw new Error(payload.error || "Could not load the Gemini key pool.");
-      const nextKeys = payload.keys ?? [];
+      const nextKeys = readBrowserApiKeys();
       setKeys(nextKeys);
-      onKeyCountChange?.(payload.total ?? nextKeys.length);
+      onKeyCountChange?.(nextKeys.length);
       setError("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not load the Gemini key pool.");
+      setError(caught instanceof Error ? caught.message : "Could not load the local Gemini key pool.");
     } finally {
       setLoading(false);
     }
@@ -46,6 +41,12 @@ export default function ApiKeyManager({ onKeyCountChange, openVersion = 0 }: Api
 
   useEffect(() => {
     void loadKeys();
+    window.addEventListener(KEY_POOL_UPDATED_EVENT, loadKeys);
+    window.addEventListener("storage", loadKeys);
+    return () => {
+      window.removeEventListener(KEY_POOL_UPDATED_EVENT, loadKeys);
+      window.removeEventListener("storage", loadKeys);
+    };
   }, [loadKeys]);
 
   useEffect(() => {
@@ -66,21 +67,14 @@ export default function ApiKeyManager({ onKeyCountChange, openVersion = 0 }: Api
     setError("");
     setNotice("");
     try {
-      const values = draft.split(/[\n,;]+/).map((value) => value.trim()).filter(Boolean);
-      const response = await fetch("/api/keys", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ keys: values }),
-      });
-      const payload = await response.json() as { keys?: StoredKey[]; total?: number; message?: string; error?: string };
-      if (!response.ok) throw new Error(payload.error || "Could not save Gemini API keys.");
-      const nextKeys = payload.keys ?? [];
+      const values = parseBrowserApiKeyInput(draft);
+      const nextKeys = saveBrowserApiKeys(values);
       setKeys(nextKeys);
-      onKeyCountChange?.(payload.total ?? nextKeys.length);
+      onKeyCountChange?.(nextKeys.length);
       setDraft("");
-      setNotice(payload.message || "Gemini API keys saved securely.");
+      setNotice("Keys are saved only in this browser and are not stored by the studio server.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save Gemini API keys.");
+      setError(caught instanceof Error ? caught.message : "Could not save Gemini API keys in this browser.");
     } finally {
       setSaving(false);
     }
@@ -91,14 +85,12 @@ export default function ApiKeyManager({ onKeyCountChange, openVersion = 0 }: Api
     setError("");
     setNotice("");
     try {
-      const response = await fetch("/api/keys", { method: "DELETE" });
-      const payload = await response.json() as { error?: string; message?: string };
-      if (!response.ok) throw new Error(payload.error || "Could not clear the Gemini key pool.");
+      clearBrowserApiKeys();
       setKeys([]);
       onKeyCountChange?.(0);
-      setNotice(payload.message || "The Gemini key pool was cleared.");
+      setNotice("The Gemini key pool was removed from this browser.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not clear the Gemini key pool.");
+      setError(caught instanceof Error ? caught.message : "Could not clear the local Gemini key pool.");
     } finally {
       setSaving(false);
     }
@@ -131,7 +123,7 @@ export default function ApiKeyManager({ onKeyCountChange, openVersion = 0 }: Api
 
             <div className="key-security-banner">
               <ShieldCheck size={16} />
-              <span>Keys are encrypted at rest and never returned to the browser.</span>
+              <span>Keys stay in this browser&apos;s local storage (not encrypted); generation requests use them transiently and never save them on the server.</span>
               <span className="security-lock"><LockKeyhole size={14} /></span>
             </div>
 
@@ -167,7 +159,7 @@ export default function ApiKeyManager({ onKeyCountChange, openVersion = 0 }: Api
               </div>
               <div className="key-list">
                 {loading ? (
-                  <div className="key-empty-state"><LoaderCircle className="spin" size={16} /> Loading encrypted keys…</div>
+                  <div className="key-empty-state"><LoaderCircle className="spin" size={16} /> Loading local keys…</div>
                 ) : keys.length > 0 ? keys.map((key) => (
                   <div className="saved-key-row" key={key.id}>
                     <span className="saved-key-icon"><KeyRound size={14} /></span>

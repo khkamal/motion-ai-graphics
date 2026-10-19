@@ -11,7 +11,7 @@ import { resolveFfmpegPath } from "@/lib/videoProcessor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 900;
+export const maxDuration = 300;
 
 const execFile = promisify(execFileCallback);
 const optionsSchema = z.object({
@@ -85,7 +85,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     ];
 
     await execFile(ffmpegPath, args, {
-      timeout: Math.max(180_000, options.duration * 30_000),
+      timeout: Math.min(290_000, Math.max(180_000, options.duration * 30_000)),
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
       signal: request.signal,
