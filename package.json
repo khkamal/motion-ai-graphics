@@ -1,0 +1,36 @@
+{
+  "name": "motion-ai-studio",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "dev": "next dev -H 0.0.0.0",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio -H 0.0.0.0"
+  },
+  "dependencies": {
+    "@prisma/client": "7.10.1",
+    "ffmpeg-static-electron-v5-linux-x64": "5.2.5",
+    "lucide-react": "^0.468.0",
+    "next": "16.4.2",
+    "react": "19.2.9",
+    "react-dom": "19.2.9",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.1",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "@tailwindcss/postcss": "4.3.3",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.30",
+    "prisma": "7.10.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "^5.9.3"
+  }
+}
