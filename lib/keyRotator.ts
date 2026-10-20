@@ -25,6 +25,14 @@ export type RotatingKeyResult = {
   response: Response;
   keys: BrowserApiKey[];
   rotationCursor: number;
+  usedKeyId: string;
+};
+
+export type KeyRotationOptions = {
+  timeoutMs?: number;
+  retryNetworkErrors?: boolean;
+  isKeyRejected?: (status: number, body: string) => boolean;
+  isRetryableStatus?: (status: number) => boolean;
 };
 
 function isRateLimit(status: number, body: string): boolean {
@@ -43,7 +51,12 @@ export async function requestWithRotatingKey(
   inputKeys: BrowserApiKey[],
   rotationCursor: number,
   requestFactory: (apiKey: string, signal: AbortSignal) => Promise<Response>,
+  options: KeyRotationOptions = {},
 ): Promise<RotatingKeyResult> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const retryNetworkErrors = options.retryNetworkErrors ?? true;
+  const keyRejected = options.isKeyRejected ?? isKeyRejected;
+  const retryableStatus = options.isRetryableStatus ?? isRetryableStatus;
   const keys = inputKeys.map((key) => ({ ...key }));
   if (keys.length === 0) {
     throw new ApiKeyPoolExhaustedError("No Gemini API keys are configured in this browser.", keys, 0);
@@ -80,9 +93,10 @@ export async function requestWithRotatingKey(
     key.lastUsedAt = new Date().toISOString();
     let response: Response;
     try {
-      response = await requestFactory(key.value, AbortSignal.timeout(30_000));
+      response = await requestFactory(key.value, AbortSignal.timeout(timeoutMs));
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : "Gemini network request failed.";
+      if (!retryNetworkErrors) break;
       continue;
     }
 
@@ -90,7 +104,7 @@ export async function requestWithRotatingKey(
       key.status = "ACTIVE";
       key.failureCount = 0;
       key.cooldownUntil = null;
-      return { response, keys, rotationCursor: nextCursor };
+      return { response, keys, rotationCursor: (index + 1) % keys.length, usedKeyId: key.id };
     }
 
     const body = await response.clone().text().catch(() => "");
@@ -103,7 +117,7 @@ export async function requestWithRotatingKey(
       continue;
     }
 
-    if (isKeyRejected(response.status, body)) {
+    if (keyRejected(response.status, body)) {
       key.failureCount += 1;
       key.status = "INVALID";
       key.cooldownUntil = null;
@@ -111,12 +125,12 @@ export async function requestWithRotatingKey(
       continue;
     }
 
-    if (isRetryableStatus(response.status) && offset < keys.length - 1) {
+    if (retryableStatus(response.status) && offset < keys.length - 1) {
       lastFailure = `Gemini returned a temporary ${response.status} error.`;
       continue;
     }
 
-    return { response, keys, rotationCursor: nextCursor };
+    return { response, keys, rotationCursor: (index + 1) % keys.length, usedKeyId: key.id };
   }
 
   if (readyCount === 0 && retryDates.length > 0) {

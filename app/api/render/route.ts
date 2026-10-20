@@ -58,7 +58,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     const options = parsedOptions.data;
     const ffmpegPath = resolveFfmpegPath();
     workDirectory = await mkdtemp(join(tmpdir(), "motion-ai-render-"));
-    const inputPath = join(workDirectory, "capture.webm");
+    const inputExtension = file.type.includes("mp4") ? "mp4" : file.type.includes("quicktime") ? "mov" : "webm";
+    const inputPath = join(workDirectory, `source.${inputExtension}`);
     const outputName = `motion-ai-studio-${new Date().toISOString().replace(/[:.]/g, "-")}.${options.format}`;
     const outputPath = join(workDirectory, outputName);
     await writeFile(inputPath, Buffer.from(await file.arrayBuffer()));
@@ -70,6 +71,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       "-hide_banner",
       "-loglevel", "error",
       "-y",
+      "-stream_loop", "-1",
       "-i", inputPath,
       "-t", String(options.duration),
       "-vf", filter,

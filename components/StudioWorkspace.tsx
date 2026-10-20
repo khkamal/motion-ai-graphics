@@ -72,20 +72,6 @@ const modes: Array<{ id: MotionMode; label: string; short: string; icon: typeof 
   { id: "line-art", label: "Line art", short: "Line", icon: AudioLines },
 ];
 const speedOptions = [0.25, 1, 2, 3];
-const directionOptions = [
-  "a slow three-quarter orbit with one soft focus pull",
-  "a delicate parallax drift with a late, luminous reveal",
-  "a short push-in that settles into an airy, stable frame",
-  "an asymmetric camera glide with irregular particle trails",
-  "a quiet macro sweep followed by a slow, weightless pull-back",
-];
-const lightOptions = [
-  "soft rim light and fine floating dust",
-  "cool volumetric haze with warm specular accents",
-  "a restrained neon edge and a low-key shadow roll-off",
-  "pearlescent light that changes direction as the camera moves",
-  "diffuse morning light with one precise highlight bloom",
-];
 const LOCAL_DRAFT_KEY = "motion-ai-studio:draft:v1";
 const backgroundModes: BackgroundMode[] = ["original", "transparent", "green", "blue", "custom"];
 
@@ -117,41 +103,39 @@ function safeFilenameFromHeader(header: string | null, format: string): string {
   return name || `motion-ai-studio.${format}`;
 }
 
+function parseVideoKeyUpdates(header: string | null): BrowserApiKeyUpdate[] {
+  if (!header) return [];
+  try {
+    const base64 = header.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const payload: unknown = JSON.parse(window.atob(padded));
+    if (!Array.isArray(payload)) return [];
+    return payload.filter((value): value is BrowserApiKeyUpdate => {
+      if (!value || typeof value !== "object") return false;
+      const update = value as Record<string, unknown>;
+      return typeof update.id === "string" &&
+        ["ACTIVE", "COOLDOWN", "INVALID"].includes(String(update.status)) &&
+        typeof update.failureCount === "number" &&
+        (update.cooldownUntil === null || typeof update.cooldownUntil === "string") &&
+        (update.lastUsedAt === null || typeof update.lastUsedAt === "string");
+    });
+  } catch {
+    return [];
+  }
+}
+
+function readableTimelineMark(seconds: number): string {
+  const safeSeconds = Math.max(0, seconds);
+  const whole = Math.floor(safeSeconds);
+  const tenth = Math.round((safeSeconds - whole) * 10);
+  return `00:${String(whole).padStart(2, "0")}${tenth > 0 ? `.${tenth}` : ""}`;
+}
+
 function getParticleScale(value: string): number {
   const match = value.match(/(?:scale|size)\s+(?:the\s+)?particles?\s+(up|down)?\s*(?:by\s*)?(\d+(?:\.\d+)?)\s*%/i);
   if (!match) return 1;
   const amount = Math.min(200, Number(match[2])) / 100;
   return Math.max(0.2, Math.min(3, match[1]?.toLowerCase() === "down" ? 1 - amount : 1 + amount));
-}
-
-function makeLocalPrompt(input: {
-  basePrompt: string;
-  modifier: string;
-  mode: MotionMode;
-  presetName: string;
-  seed: string;
-}): { prompt: string; style: DynamicStyle } {
-  const direction = directionOptions[randomIndex(directionOptions.length)];
-  const lighting = lightOptions[randomIndex(lightOptions.length)];
-  const rhythm = ["build slowly, breathe, then resolve before the loop point", "add one irregular accent around the final third", "ease into a quiet hold after a fluid reveal", "keep the opening spacious and let the closing beat land cleanly"][randomIndex(4)];
-  const style: DynamicStyle = {
-    palette: "a newly randomized tonal palette based on the selected preset",
-    camera: direction,
-    lighting,
-    particles: ["fine light motes with independent, non-repeating drift", "a loose trail of soft particles with variable depth", "sparse atmospheric dust with a few near-lens glints"][randomIndex(3)],
-    texture: "controlled motion blur, soft halation, and preserved subject detail",
-    rhythm,
-    phaseDegrees: randomIndex(360),
-    orbitDegrees: 8 + randomIndex(41),
-    particleDensity: 28 + randomIndex(55),
-    easing: ["cubic ease-out", "soft spring", "sine drift", "quintic ease-in-out"][randomIndex(4)],
-  };
-  const subject = input.basePrompt.trim() || "the primary subject in the supplied image";
-  const modifier = input.modifier.trim() ? ` Apply this element direction: ${input.modifier.trim()}.` : "";
-  return {
-    style,
-    prompt: `Create a distinctive ${input.mode} image-to-motion sequence centered on ${subject}, in the ${input.presetName} visual treatment. Use ${direction}; ${rhythm}. Light it with ${lighting}, preserve the recognizable subject and original composition, and add ${style.particles}. Apply ${style.easing} with a ${style.orbitDegrees}-degree camera arc and a ${style.phaseDegrees}-degree phase offset. Unique variation seed ${input.seed}; keep the finish polished, stock-safe, and free of text or logos.${modifier}`,
-  };
 }
 
 function readableTime(seconds: number): string {
@@ -210,7 +194,12 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
   const [seed, setSeed] = useState("stage-preview-motion-seed");
   const [aiEnhanced, setAiEnhanced] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState("");
+  const [generationError, setGenerationError] = useState("");
   const [generationNotice, setGenerationNotice] = useState("");
+  const [generatedVideo, setGeneratedVideo] = useState<Blob | null>(null);
+  const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
+  const [generatedVideoDuration, setGeneratedVideoDuration] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [playhead, setPlayhead] = useState(0);
@@ -225,11 +214,18 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
   const [draftReady, setDraftReady] = useState(false);
   const canvasRef = useRef<StudioCanvasHandle>(null);
   const noticeTimerRef = useRef<number | null>(null);
+  const generationAbortRef = useRef<AbortController | null>(null);
+  const generationRequestIdRef = useRef(0);
 
   const selectedPreset = useMemo(() => presetById(presetId), [presetId]);
   const visualPreset = useMemo(() => buildVariationPreset(selectedPreset, seed, dynamicStyle), [selectedPreset, seed, dynamicStyle]);
   const particleScale = useMemo(() => getParticleScale(modifier), [modifier]);
+  const timelineDuration = generatedVideoUrl && generatedVideoDuration > 0 ? generatedVideoDuration : 10;
   const onKeyCountChange = useCallback((count: number) => setKeyCount(count), []);
+  const onVideoDurationChange = useCallback((duration: number): void => {
+    setGeneratedVideoDuration((current) => Math.abs(current - duration) < 0.05 ? current : duration);
+  }, []);
+  const onVideoTimeChange = useCallback((time: number): void => setPlayhead(time), []);
 
   const showNotice = useCallback((message: string, tone: NoticeTone = "success"): void => {
     setNotice({ message, tone });
@@ -239,7 +235,19 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
 
   useEffect(() => () => {
     if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
+    generationAbortRef.current?.abort();
   }, []);
+
+  useEffect(() => {
+    if (!generatedVideo) {
+      setGeneratedVideoUrl(null);
+      setGeneratedVideoDuration(0);
+      return;
+    }
+    const videoUrl = URL.createObjectURL(generatedVideo);
+    setGeneratedVideoUrl(videoUrl);
+    return () => URL.revokeObjectURL(videoUrl);
+  }, [generatedVideo]);
 
   useEffect(() => {
     try {
@@ -291,7 +299,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
   }, [draftReady, basePrompt, modifier, mode, presetId, speed, backgroundMode, customBackground, seed, generatedPrompt, aiEnhanced, dynamicStyle, showNotice]);
 
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || generatedVideoUrl) return;
     const interval = window.setInterval(() => {
       setPlayhead((current) => {
         const next = current + 0.1 * speed;
@@ -299,7 +307,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
       });
     }, 100);
     return () => window.clearInterval(interval);
-  }, [playing, speed]);
+  }, [playing, speed, generatedVideoUrl]);
 
   const randomizePreset = useCallback((): void => {
     const candidates = studioPresets.filter((preset) => preset.id !== presetId);
@@ -314,15 +322,28 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
 
   const generateMotion = async (): Promise<void> => {
     if (!image) {
-      showNotice("Add a reference image before generating motion.", "warning");
+      showNotice("Add a reference image before generating an AI video.", "warning");
       return;
     }
+    const browserKeys = readBrowserApiKeys();
+    if (browserKeys.length === 0) {
+      const message = "Add a Gemini API key in Settings. Gemini Omni Flash video generation may require a billing-enabled project.";
+      setGenerationError(message);
+      showNotice(message, "warning");
+      return;
+    }
+
+    generationAbortRef.current?.abort();
+    const abortController = new AbortController();
+    generationAbortRef.current = abortController;
+    const requestId = generationRequestIdRef.current + 1;
+    generationRequestIdRef.current = requestId;
     setIsGenerating(true);
+    setGenerationProgress("Analyzing your image and preparing a motion brief…");
+    setGenerationError("");
     setGenerationNotice("");
-    setGeneratedPrompt("");
     try {
-      const browserKeys = readBrowserApiKeys();
-      const response = await fetch("/api/generate", {
+      const promptResponse = await fetch("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -335,37 +356,77 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
           rotationCursor: readBrowserRotationCursor(),
           recentSignatures: readRecentStyleSignatures(),
         }),
+        signal: abortController.signal,
       });
-      const payload = await response.json() as GenerationPayload & { error?: string; details?: unknown };
-      if (!response.ok) throw new Error(payload.error || "The motion direction could not be generated.");
-      applyBrowserApiKeyUpdates(payload.keyUpdates ?? []);
-      writeBrowserRotationCursor(payload.rotationCursor ?? 0);
+      const payload = await promptResponse.json() as GenerationPayload & { error?: string; details?: unknown };
+      if (requestId !== generationRequestIdRef.current) return;
+      if (!promptResponse.ok) throw new Error(payload.error || "The image-aware motion brief could not be prepared.");
+
+      const keysAfterPrompt = applyBrowserApiKeyUpdates(payload.keyUpdates ?? []);
+      const rotationCursor = payload.rotationCursor ?? readBrowserRotationCursor();
+      writeBrowserRotationCursor(rotationCursor);
       rememberStyleSignature(payload.styleSignature);
       setSeed(payload.seed);
       setDynamicStyle(payload.style);
       setGeneratedPrompt(payload.prompt);
       setAiEnhanced(payload.aiEnhanced);
-      setGenerationNotice(payload.notice || (payload.aiEnhanced ? "Image analyzed and style varied with Gemini." : "A unique local variation was created."));
+      setGenerationProgress("Gemini Omni Flash is generating the video. This can take a few minutes; keep this tab open…");
+
+      const videoResponse = await fetch("/api/generate-video", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          image: image.analysisImage,
+          prompt: payload.prompt,
+          mode,
+          presetName: selectedPreset.name,
+          backgroundMode,
+          customBackground,
+          keys: keysAfterPrompt,
+          rotationCursor,
+        }),
+        signal: abortController.signal,
+      });
+      if (requestId !== generationRequestIdRef.current) return;
+      const headerUpdates = parseVideoKeyUpdates(videoResponse.headers.get("x-gemini-key-updates"));
+      const errorPayload = videoResponse.ok
+        ? null
+        : await videoResponse.json().catch(() => null) as { error?: string; keyUpdates?: BrowserApiKeyUpdate[]; rotationCursor?: number } | null;
+      const responseUpdates = errorPayload?.keyUpdates?.length ? errorPayload.keyUpdates : headerUpdates;
+      if (responseUpdates.length > 0) applyBrowserApiKeyUpdates(responseUpdates);
+      const responseCursor = Number(videoResponse.headers.get("x-gemini-rotation-cursor") ?? errorPayload?.rotationCursor);
+      if (Number.isSafeInteger(responseCursor) && responseCursor >= 0) writeBrowserRotationCursor(responseCursor);
+      if (!videoResponse.ok) {
+        throw new Error(errorPayload?.error || "Gemini Omni Flash could not generate the video. No procedural fallback was used.");
+      }
+      if (!videoResponse.headers.get("content-type")?.toLowerCase().startsWith("video/mp4")) {
+        throw new Error("The video-generation service returned an unsupported file. No procedural fallback was used.");
+      }
+
+      const video = await videoResponse.blob();
+      if (requestId !== generationRequestIdRef.current) return;
+      if (video.size < 256) throw new Error("Gemini returned an empty video file. No procedural fallback was used.");
+      setGeneratedVideoDuration(0);
+      setGeneratedVideo(video);
       setPlayhead(0);
       setSeekRevision((revision) => revision + 1);
       setPlaying(true);
-      if (payload.aiEnhanced) showNotice("A fresh Gemini motion direction is ready.");
-      else showNotice("A unique motion direction is ready. Add Gemini keys for image-aware prompt refinement.", "warning");
+      setGenerationNotice(`${payload.aiEnhanced ? "Gemini-refined motion brief" : "Local motion brief"} · real AI video rendered by Gemini Omni Flash at 1080p. The result is held in this tab, not saved by Motion AI Studio.`);
+      setGenerationProgress("");
+      showNotice("Gemini Omni Flash generated a real AI video.");
     } catch (caught) {
-      const localSeed = createClientSeed();
-      const fallback = makeLocalPrompt({ basePrompt, modifier, mode, presetName: selectedPreset.name, seed: localSeed });
-      rememberStyleSignature(`fresh-${localSeed.slice(0, 20)}`);
-      setSeed(localSeed);
-      setDynamicStyle(fallback.style);
-      setGeneratedPrompt(fallback.prompt);
-      setAiEnhanced(false);
-      setGenerationNotice("The studio service could not be reached. A fresh local direction is active; try again when the connection is restored.");
-      setPlayhead(0);
-      setSeekRevision((revision) => revision + 1);
-      setPlaying(true);
-      showNotice(caught instanceof Error ? caught.message : "Generation service unavailable; local variation applied.", "warning");
+      if (requestId !== generationRequestIdRef.current || abortController.signal.aborted) return;
+      const message = caught instanceof Error ? caught.message : "Gemini Omni Flash could not generate the video.";
+      setGenerationProgress("");
+      setGenerationError(message);
+      setGenerationNotice("");
+      showNotice(message, "error");
     } finally {
-      setIsGenerating(false);
+      if (requestId === generationRequestIdRef.current) {
+        setIsGenerating(false);
+        setGenerationProgress("");
+        if (generationAbortRef.current === abortController) generationAbortRef.current = null;
+      }
     }
   };
 
@@ -374,8 +435,14 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
     onProgress: (value: number, label?: string) => void,
   ): Promise<void> => {
     if (!image) throw new Error("Upload a reference image before exporting a motion sequence.");
-    if (!canvasRef.current) throw new Error("The motion stage is not ready to capture.");
-    const capture = await canvasRef.current.record(settings, onProgress);
+    let capture: Blob;
+    if (generatedVideo) {
+      onProgress(82, "Preparing your Gemini-generated AI video…");
+      capture = generatedVideo;
+    } else {
+      if (!canvasRef.current) throw new Error("The motion stage is not ready to capture.");
+      capture = await canvasRef.current.record(settings, onProgress);
+    }
     const form = new FormData();
     form.set("video", capture, `motion-stage.${capture.type.includes("mp4") ? "mp4" : "webm"}`);
     form.set("options", JSON.stringify(settings));
@@ -423,7 +490,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
   };
 
   const togglePlay = (): void => {
-    if (!playing && playhead >= 9.9) {
+    if (!playing && playhead >= timelineDuration - 0.1) {
       setPlayhead(0);
       setSeekRevision((revision) => revision + 1);
     }
@@ -451,7 +518,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
             <div className="engine-status"><span className={`status-dot ${renderEngineAvailable ? "" : "status-dot-warning"}`} /><span>{renderEngineAvailable ? "Render engine ready" : "FFmpeg setup needed"}</span></div>
             <ApiKeyManager onKeyCountChange={onKeyCountChange} openVersion={keyModalVersion} />
             <span className="topbar-divider" />
-            <button className="button button-primary top-export-button" type="button" onClick={() => setIsRenderOpen(true)} disabled={!image || !renderEngineAvailable}>
+            <button className="button button-primary top-export-button" type="button" onClick={() => setIsRenderOpen(true)} disabled={!image || !renderEngineAvailable || isGenerating}>
               <Download size={15} /> Export
               <span className="export-shortcut">↗</span>
             </button>
@@ -475,7 +542,24 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                   <div><span className="eyebrow">YOUR SOURCE</span><h3>Reference image</h3></div>
                   <button className="subtle-icon-button" type="button" onClick={() => setBrowseVersion((version) => version + 1)} aria-label="Choose an image"><ImageIcon size={15} /></button>
                 </div>
-                <ImageUploader value={image} onChange={setImage} browseVersion={browseVersion} />
+                <ImageUploader
+                  value={image}
+                  onChange={(nextImage) => {
+                    generationAbortRef.current?.abort();
+                    generationAbortRef.current = null;
+                    generationRequestIdRef.current += 1;
+                    setIsGenerating(false);
+                    setGenerationProgress("");
+                    setGenerationError("");
+                    setGenerationNotice("");
+                    setGeneratedPrompt("");
+                    setDynamicStyle(null);
+                    setAiEnhanced(false);
+                    setGeneratedVideo(null);
+                    setImage(nextImage);
+                  }}
+                  browseVersion={browseVersion}
+                />
               </div>
 
               <div className="panel-divider" />
@@ -493,7 +577,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                   maxLength={1_200}
                   aria-label="Creative direction for the motion"
                 />
-                <div className="prompt-helper"><Sparkles size={12} /><span>Gemini reads your image and rewrites this into a fresh motion brief.</span></div>
+                <div className="prompt-helper"><Sparkles size={12} /><span>Gemini refines the image-aware brief, then renders real AI video.</span></div>
 
                 <div className="mode-select-label"><span className="field-label">MOTION MODE</span><span className="mode-hint">Choose a visual language</span></div>
                 <div className="mode-options" role="group" aria-label="Motion mode">
@@ -506,10 +590,13 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
 
                 <button className="generate-button" type="button" onClick={() => void generateMotion()} disabled={isGenerating || !image}>
                   {isGenerating ? <LoaderCircle className="spin" size={17} /> : <WandSparkles size={17} />}
-                  <span>{isGenerating ? "Building a new motion…" : "Generate unique motion"}</span>
+                  <span>{isGenerating ? generationProgress.startsWith("Gemini Omni Flash") ? "Generating AI video…" : "Analyzing image…" : "Generate real AI video"}</span>
                   {!isGenerating && <span className="generate-arrow">↗</span>}
                 </button>
-                <div className="generate-footnote"><LockKeyhole size={11} /><span>Every pass gets a fresh cryptographic seed</span></div>
+                <div className="generate-footnote"><LockKeyhole size={11} /><span>Each pass gets a fresh cryptographic seed</span></div>
+                <div className="generation-privacy-note"><Info size={12} /><span>Google processes the image; Omni video access may require billing. Interaction storage is disabled. Motion AI Studio keeps the MP4 only in this tab, while Google may temporarily host it for delivery.</span></div>
+                {generationProgress && <div className="generation-progress" role="status"><LoaderCircle className="spin" size={13} /><span>{generationProgress}</span></div>}
+                {generationError && <div className="generation-inline-error" role="alert"><Info size={13} /><span>{generationError}</span></div>}
               </div>
 
               {generatedPrompt && (
@@ -526,11 +613,11 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
 
             <section className="preview-column" aria-label="Motion preview">
               <div className="preview-panel-heading">
-                <div className="preview-panel-title"><span className="preview-live-dot" /><div><span className="eyebrow">LIVE PREVIEW</span><strong>{image ? "Motion stage" : "Atmosphere study"}</strong></div></div>
+                <div className="preview-panel-title"><span className="preview-live-dot" /><div><span className="eyebrow">{generatedVideoUrl ? "AI VIDEO PREVIEW" : "LIVE PREVIEW"}</span><strong>{generatedVideoUrl ? "Gemini Omni Flash" : image ? "Motion stage" : "Atmosphere study"}</strong></div></div>
                 <div className="preview-heading-actions">
-                  <div className="preview-resolution-tag">1920 <span>×</span> 1080</div>
+                  <div className="preview-resolution-tag">{generatedVideoUrl ? "AI 1080p" : <>1920 <span>×</span> 1080</>}</div>
                   <span className="preview-heading-separator" />
-                  <button className="icon-button preview-restart-button" type="button" onClick={() => { setPlayhead(0); setSeekRevision((revision) => revision + 1); }} aria-label="Restart preview" title="Restart preview"><RotateCcw size={14} /></button>
+                  <button className="icon-button preview-restart-button" type="button" onClick={() => { setPlayhead(0); setSeekRevision((revision) => revision + 1); setPlaying(true); }} aria-label="Restart preview" title="Restart preview"><RotateCcw size={14} /></button>
                 </div>
               </div>
 
@@ -538,6 +625,9 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                 ref={canvasRef}
                 imageUrl={image?.src ?? null}
                 imageName={image?.fileName}
+                videoUrl={generatedVideoUrl}
+                onVideoDurationChange={onVideoDurationChange}
+                onVideoTimeChange={onVideoTimeChange}
                 mode={mode}
                 preset={visualPreset}
                 seed={seed}
@@ -555,11 +645,11 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                   <button className="transport-button" type="button" onClick={togglePlay} aria-label={playing ? "Pause preview" : "Play preview"}>
                     {playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
                   </button>
-                  <span className="time-readout">{readableTime(playhead)}<span> / </span>00:00:10</span>
+                  <span className="time-readout">{readableTime(Math.min(playhead, timelineDuration))}<span> / </span>{readableTime(timelineDuration)}</span>
                   <div className="timeline-track-wrap">
-                    <div className="timeline-ruler"><span>00:00</span><span>00:02.5</span><span>00:05</span><span>00:07.5</span><span>00:10</span></div>
-                    <div className="timeline-track"><div className="timeline-progress" style={{ width: `${(playhead / 10) * 100}%` }} /><span className="timeline-playhead" style={{ left: `${(playhead / 10) * 100}%` }} /></div>
-                    <input className="timeline-range" type="range" min={0} max={10} step={0.01} value={playhead} onChange={(event) => handleScrub(Number(event.target.value))} aria-label="Scrub the motion preview" />
+                    <div className="timeline-ruler">{[0, 0.25, 0.5, 0.75, 1].map((point) => <span key={point}>{readableTimelineMark(timelineDuration * point)}</span>)}</div>
+                    <div className="timeline-track"><div className="timeline-progress" style={{ width: `${Math.min(100, (playhead / timelineDuration) * 100)}%` }} /><span className="timeline-playhead" style={{ left: `${Math.min(100, (playhead / timelineDuration) * 100)}%` }} /></div>
+                    <input className="timeline-range" type="range" min={0} max={timelineDuration} step={0.01} value={Math.min(playhead, timelineDuration)} onChange={(event) => handleScrub(Number(event.target.value))} aria-label="Scrub the motion preview" />
                   </div>
                   <label className="speed-select-wrap" aria-label="Playback speed">
                     <Gauge size={14} />
@@ -568,9 +658,14 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                     </select>
                     <ChevronDown size={12} />
                   </label>
-                  <button className="icon-button timeline-settings-button" type="button" onClick={() => setIsRenderOpen(true)} disabled={!image || !renderEngineAvailable} aria-label="Open export settings" title="Open export settings"><SlidersHorizontal size={14} /></button>
+                  <button className="icon-button timeline-settings-button" type="button" onClick={() => setIsRenderOpen(true)} disabled={!image || !renderEngineAvailable || isGenerating} aria-label="Open export settings" title="Open export settings"><SlidersHorizontal size={14} /></button>
                 </div>
-                <div className="timeline-caption"><span><span className="timeline-caption-dot" /> {visualPreset.name}</span><span>{mode === "line-art" ? "LINE ART" : mode.toUpperCase()} <span className="meta-divider" /> {visualPreset.layout}</span></div>
+                {generatedVideoUrl
+                  ? <>
+                    <div className="timeline-caption ai-video-caption"><span><span className="timeline-caption-dot" /> Gemini Omni Flash · AI output</span><span>Baked 1080P <span className="meta-divider" /> {generatedVideoDuration > 0 ? `${generatedVideoDuration.toFixed(1)} SEC` : "LOADING CLIP"}</span></div>
+                    <div className="ai-video-baked-note">This clip is baked. Prompt, mode, and preset edits require a new generation; playback speed still affects preview.</div>
+                  </>
+                  : <div className="timeline-caption"><span><span className="timeline-caption-dot" /> {visualPreset.name}</span><span>{mode === "line-art" ? "LINE ART" : mode.toUpperCase()} <span className="meta-divider" /> {visualPreset.layout}</span></div>}
               </div>
             </section>
 
@@ -631,7 +726,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                   <ChevronDown size={14} />
                 </label>
                 {backgroundMode === "custom" && <label className="custom-color-row"><span>Matte color</span><input type="color" value={customBackground} onChange={(event) => setCustomBackground(event.target.value)} aria-label="Custom background color" /><strong>{customBackground.toUpperCase()}</strong></label>}
-                <div className="chroma-note"><Info size={12} /><span>Matte colors are rendered into the stage for downstream keying.</span></div>
+                <div className="chroma-note"><Info size={12} /><span>{generatedVideo ? "AI video is baked and opaque; chroma, transparency, and palette controls do not alter it. Set a matte before generating to include it in the prompt." : "Matte colors are rendered into the stage for downstream keying."}</span></div>
               </div>
 
               <div className="inspector-separator" />
@@ -656,7 +751,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
                 <div className="variation-seed-row"><span>SEED</span><code>{seed.slice(0, 12).toUpperCase()}</code><button type="button" onClick={() => { navigator.clipboard?.writeText(seed).then(() => showNotice("Variation seed copied."), () => showNotice("Clipboard access is blocked.", "warning")); }} aria-label="Copy variation seed"><Copy size={12} /></button></div>
               </div>
 
-              <button className="inspector-export-button" type="button" onClick={() => setIsRenderOpen(true)} disabled={!image || !renderEngineAvailable}>
+              <button className="inspector-export-button" type="button" onClick={() => setIsRenderOpen(true)} disabled={!image || !renderEngineAvailable || isGenerating}>
                 <span><Download size={15} /> Export master</span><span>4K <ChevronDown size={13} /></span>
               </button>
             </aside>
@@ -677,7 +772,7 @@ export default function StudioWorkspace({ renderEngineAvailable }: { renderEngin
         </div>
       )}
 
-      <RenderModal open={isRenderOpen} onClose={() => setIsRenderOpen(false)} onExport={exportVideo} />
+      <RenderModal open={isRenderOpen} onClose={() => setIsRenderOpen(false)} aiVideoAvailable={Boolean(generatedVideo)} onExport={exportVideo} />
       <span className="screen-reader-status" aria-live="polite">{keyCount > 0 ? `${keyCount} Gemini API keys connected` : "Gemini API keys not connected"}</span>
     </div>
   );
