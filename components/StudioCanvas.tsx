@@ -15,6 +15,9 @@ export type StudioCanvasHandle = {
 type StudioCanvasProps = {
   imageUrl: string | null;
   imageName?: string;
+  videoUrl: string | null;
+  onVideoDurationChange: (duration: number) => void;
+  onVideoTimeChange: (time: number) => void;
   mode: MotionMode;
   preset: StudioPreset;
   seed: string;
@@ -31,6 +34,7 @@ type Particle = { x: number; y: number; size: number; phase: number; speed: numb
 
 type SceneState = {
   imageUrl: string | null;
+  videoUrl: string | null;
   mode: MotionMode;
   preset: StudioPreset;
   seed: string;
@@ -342,6 +346,7 @@ async function waitForImage(image: HTMLImageElement | null): Promise<void> {
 
 const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function StudioCanvas(props, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const sceneRef = useRef<SceneState>(props);
   const elapsedRef = useRef(0);
@@ -398,6 +403,7 @@ const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function 
       const state = sceneRef.current;
       const width = canvas.width;
       const height = canvas.height;
+      if (state.videoUrl) return;
       if (!width || !height) {
         frameId = window.requestAnimationFrame(drawFrame);
         return;
@@ -419,7 +425,44 @@ const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function 
       resizeObserverRef.current = null;
       previousFrameRef.current = 0;
     };
-  }, [props.imageUrl]);
+  }, [props.imageUrl, props.videoUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !props.videoUrl) return;
+
+    const syncDuration = (): void => {
+      if (Number.isFinite(video.duration) && video.duration > 0) props.onVideoDurationChange(video.duration);
+    };
+    const syncTime = (): void => {
+      if (Number.isFinite(video.currentTime)) props.onVideoTimeChange(video.currentTime);
+    };
+    video.addEventListener("loadedmetadata", syncDuration);
+    video.addEventListener("durationchange", syncDuration);
+    video.addEventListener("timeupdate", syncTime);
+    syncDuration();
+    syncTime();
+    return () => {
+      video.removeEventListener("loadedmetadata", syncDuration);
+      video.removeEventListener("durationchange", syncDuration);
+      video.removeEventListener("timeupdate", syncTime);
+    };
+  }, [props.videoUrl, props.onVideoDurationChange, props.onVideoTimeChange]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !props.videoUrl) return;
+    video.playbackRate = Math.max(0.25, Math.min(3, props.speed));
+    if (props.playing) void video.play().catch(() => undefined);
+    else video.pause();
+  }, [props.videoUrl, props.playing, props.speed]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !props.videoUrl || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    const target = Math.min(video.duration, Math.max(0, props.seekTime));
+    if (Math.abs(video.currentTime - target) > 0.05) video.currentTime = target;
+  }, [props.videoUrl, props.seekRevision]);
 
   useImperativeHandle(ref, () => ({
     async record(settings, onProgress): Promise<Blob> {
@@ -544,7 +587,20 @@ const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function 
 
   return (
     <div className="canvas-shell">
-      <canvas ref={canvasRef} className="preview-canvas" aria-label="Animated motion preview" />
+      <canvas ref={canvasRef} className={`preview-canvas ${props.videoUrl ? "preview-canvas-hidden" : ""}`} aria-label="Animated motion preview" />
+      {props.videoUrl && (
+        <video
+          ref={videoRef}
+          className="preview-video"
+          src={props.videoUrl}
+          autoPlay={props.playing}
+          loop
+          muted
+          playsInline
+          preload="metadata"
+          aria-label="Gemini-generated video preview"
+        />
+      )}
       {!props.imageUrl && (
         <div className="empty-canvas-copy" aria-hidden="true">
           <div className="empty-canvas-kicker"><Sparkles size={12} /> CREATIVE STAGE</div>
@@ -553,7 +609,7 @@ const StudioCanvas = forwardRef<StudioCanvasHandle, StudioCanvasProps>(function 
         </div>
       )}
       {props.imageUrl && (
-        <div className="canvas-image-label"><span className="canvas-label-icon"><Sparkles size={11} /></span>{props.imageName || "Reference image"}</div>
+        <div className="canvas-image-label"><span className="canvas-label-icon"><Sparkles size={11} /></span>{props.videoUrl ? "Gemini AI-generated video" : props.imageName || "Reference image"}</div>
       )}
       <button className="canvas-expand-button" type="button" aria-label="Canvas preview fills available area" title="Preview stage"><Maximize2 size={14} /></button>
       <div className="canvas-corner canvas-corner-tl" aria-hidden="true" />

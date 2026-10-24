@@ -14,12 +14,13 @@ export type RenderSettings = {
 type RenderModalProps = {
   open: boolean;
   onClose: () => void;
+  aiVideoAvailable: boolean;
   onExport: (settings: RenderSettings, onProgress: (value: number, label?: string) => void) => Promise<void>;
 };
 
 const durations: Array<RenderSettings["duration"]> = [5, 10, 15, 30];
 
-export default function RenderModal({ open, onClose, onExport }: RenderModalProps) {
+export default function RenderModal({ open, onClose, onExport, aiVideoAvailable }: RenderModalProps) {
   const [settings, setSettings] = useState<RenderSettings>({ duration: 5, resolution: "4k", format: "mp4", codecSpeed: "medium", fps: 30 });
   const [rendering, setRendering] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -149,7 +150,7 @@ export default function RenderModal({ open, onClose, onExport }: RenderModalProp
             </div>
           )}
 
-          <p className="render-disclaimer">The animation is captured at a device-safe browser resolution, then FFmpeg creates your selected 30 FPS delivery size on the studio server. The transparency checker is flattened in MP4/MOV; choose green or blue for a chroma plate. 4K encoding can take a few minutes.</p>
+          <p className="render-disclaimer">{aiVideoAvailable ? "The Gemini Omni Flash MP4 is encoded directly to your selected 30 FPS size; shorter clips are trimmed and longer selections loop the generated video. 4K output is upscaled from the 1080p AI render. AI clips are opaque, so background/chroma controls do not change this baked result. The interaction uses store=false; Google temporarily hosts the MP4 for delivery, then Motion AI Studio requests deletion." : "The animation is captured at a device-safe browser resolution, then FFmpeg creates your selected 30 FPS delivery size on the studio server. The transparency checker is flattened in MP4/MOV; choose green or blue for a chroma plate. 4K encoding can take a few minutes."}</p>
         </div>
 
         <div className="render-modal-footer">
